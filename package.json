@@ -1,0 +1,46 @@
+{
+  "name": "mittens",
+  "version": "0.1.0",
+  "description": "MITM proxy for agent CLIs (Claude, Cursor, Antigravity) — intercept API traffic, tap streaming events, keep interactive billing. Drop-in claude -p replacement + OpenClaw plugin.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "mittens": "./src/core/cli.ts",
+    "claude-p": "./src/core/cli.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-p",
+    "anthropic",
+    "cursor",
+    "antigravity",
+    "mitm",
+    "stream-json",
+    "cli",
+    "openclaw",
+    "agent",
+    "proxy",
+    "interactive",
+    "billing"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0"
+  },
+  "dependencies": {
+    "global-agent": "^4.1.3"
+  }
+}

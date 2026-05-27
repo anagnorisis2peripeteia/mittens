@@ -1,0 +1,23 @@
+{
+  "id": "mittens",
+  "name": "Mittens",
+  "description": "MITM proxy backends for agent CLIs — intercept API traffic, normalise to Claude stream-json, keep interactive billing",
+  "cliBackends": [
+    "mittens-claude",
+    "mittens-gemini",
+    "mittens-codex",
+    "mittens-cursor",
+    "mittens-antigravity"
+  ],
+  "setup": {
+    "cliBackends": ["mittens-claude"],
+    "requiresRuntime": false
+  },
+  "activation": {
+    "onStartup": false
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}

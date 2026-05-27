@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "rootDir": "."
+  },
+  "//": "Core-only for now. The OpenClaw plugin adapter (src/openclaw-plugin) imports openclaw/plugin-sdk/* and is typechecked once that dep is wired — see README.",
+  "include": ["src/core/**/*.ts", "src/adapters/**/*.ts"],
+  "exclude": ["node_modules", "src/openclaw-plugin"]
+}
