@@ -161,6 +161,10 @@ export function isAllowedConnectHost(host: string, target?: MitmTargetConfig): b
   return suffixes.some(s => normalized === s || normalized.endsWith(s));
 }
 
+export function isApiConnectHost(host: string, target?: MitmTargetConfig): boolean {
+  return host.trim().toLowerCase() === (target?.host ?? DEFAULT_UPSTREAM_HOST).toLowerCase();
+}
+
 export async function startMitmProxy(certs: CertPaths, target?: MitmTargetConfig): Promise<MitmProxyHandle> {
   const upstreamHost = target?.host ?? DEFAULT_UPSTREAM_HOST;
   const upstreamPort = target?.port ?? DEFAULT_UPSTREAM_PORT;
@@ -381,7 +385,7 @@ export async function startMitmProxy(certs: CertPaths, target?: MitmTargetConfig
     }
 
     const reqBody = reqBodyChunks.length > 0 ? Buffer.concat(reqBodyChunks).toString("utf8") : undefined;
-    let requestType: "normal" | "compaction" | "tool_followup" | "auxiliary" = "normal";
+    let requestType: "normal" | "compaction" | "tool_followup" | "auxiliary" | "subagent" = "normal";
 
     if (reqMethod === "POST" && reqBody) {
       try {
@@ -416,6 +420,19 @@ export async function startMitmProxy(certs: CertPaths, target?: MitmTargetConfig
           }
         }
         if (requestType === "normal" && !hasTools) requestType = "auxiliary";
+        if (requestType === "normal" || requestType === "tool_followup") {
+          const toolList = Array.isArray(parsed.tools) ? parsed.tools : [];
+          const hasAgentTool = toolList.some(
+            (t: Record<string, unknown> | null) => t?.name === "Agent",
+          );
+          const usesServerWebSearch = toolList.some((t: Record<string, unknown> | null) => {
+            const ty = t?.type;
+            return typeof ty === "string" && ty.includes("web_search");
+          });
+          if (!hasAgentTool || usesServerWebSearch) {
+            requestType = "subagent";
+          }
+        }
       } catch {}
     }
 
@@ -677,17 +694,16 @@ export async function startMitmProxy(certs: CertPaths, target?: MitmTargetConfig
       const [host, portStr] = connectTarget.split(":");
       const targetPort = Number.parseInt(portStr, 10) || 443;
 
-      if (!isAllowedConnectHost(host ?? "", target)) {
-        // eslint-disable-next-line no-console
-        console.warn(`[openclaw-proxy] refused CONNECT to non-allowed host: ${host ?? "(none)"}`);
-        client.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      if (!host) {
+        client.write("HTTP/1.1 400 Bad Request\r\n\r\n");
         client.destroy();
         return;
       }
 
       // mitmAll: intercept ALL allowed hosts (SNI provides per-host certs).
-      // Otherwise only the exact target host is MITM'd; the rest are tunneled.
-      const isApiHost = target?.mitmAll ? isAllowedConnectHost(host ?? "", target) : (host === upstreamHost);
+      // Otherwise only the exact target host is MITM'd; the rest are tunneled
+      // through for web access (WebFetch/WebSearch).
+      const isApiHost = target?.mitmAll ? isAllowedConnectHost(host, target) : isApiConnectHost(host, target);
       const localAddr = bindAddr === "0.0.0.0" ? "127.0.0.1" : bindAddr;
       const destHost = isApiHost ? localAddr : host;
       const useH2 = target?.useH2 === true && h2Port > 0;

@@ -556,6 +556,9 @@ async function main(): Promise<void> {
     cliEnv.HTTPS_PROXY = `http://127.0.0.1:${proxy.connectPort}`;
     cliEnv.NODE_EXTRA_CA_CERTS = certs.caPath;
   }
+  if (adapter.id === "claude") {
+    cliEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
+  }
   if (adapter.needsTtySpoof) {
     const useSystemCa = proxy ? " --use-system-ca" : "";
     cliEnv.NODE_OPTIONS = `--require "${TTY_SPOOF_PATH}"${useSystemCa}`;
@@ -765,10 +768,10 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Claude-native path: request classification + compaction handling
+      // Claude-native path: request classification + compaction/subagent handling
       const reqId = typeof evt._reqId === "number" ? evt._reqId : 0;
       const requestType = (typeof evt._requestType === "string" ? evt._requestType : "normal") as
-        | "normal" | "compaction" | "tool_followup" | "auxiliary";
+        | "normal" | "compaction" | "tool_followup" | "auxiliary" | "subagent";
       delete evt._reqId;
       delete evt._requestType;
       const line = JSON.stringify({ type: "stream_event", event: evt });
@@ -782,14 +785,14 @@ async function main(): Promise<void> {
         currentStopReason = "";
         lastUsage = {};
         dbg("turn start reqId=", reqId, "type=", requestType);
-        if (requestType === "compaction") return;
+        if (requestType === "compaction" || requestType === "subagent") return;
         emit(line);
         return;
       }
 
       if (reqId !== activeReqId) return;
 
-      if (requestType === "compaction") {
+      if (requestType === "compaction" || requestType === "subagent") {
         if (eventType === "content_block_delta") {
           const d = evt.delta as Record<string, unknown> | undefined;
           if (d?.type === "text_delta" && typeof d.text === "string") {
@@ -801,12 +804,27 @@ async function main(): Promise<void> {
                 delta: { type: "thinking_delta", thinking: d.text },
               },
             }));
+            return;
           }
+          if (requestType === "subagent" && d?.type === "input_json_delta") {
+            emit(line);
+          }
+          return;
+        }
+        if (requestType === "subagent" && eventType === "content_block_start") {
+          const cb = (evt as Record<string, unknown>).content_block as Record<string, unknown> | undefined;
+          if (cb?.type === "tool_use") {
+            emit(line);
+          }
+          return;
+        }
+        if (requestType === "subagent" && eventType === "content_block_stop") {
+          emit(line);
           return;
         }
         if (eventType === "message_stop") {
           turnActive = false;
-          dbg("compaction stream message_stop reqId=", reqId);
+          dbg(requestType, "stream message_stop reqId=", reqId, "— suppressed; awaiting primary turn");
         }
         return;
       }
