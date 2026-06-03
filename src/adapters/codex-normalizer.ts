@@ -1,44 +1,70 @@
 /**
- * Codex -> Claude stream-json normalizer.
+ * Codex exec --json -> Claude stream-json normalizer.
  *
- * Transforms OpenAI Responses API WebSocket events (as captured by the
- * MITM tap) into Claude's stream-json JSONL format so OpenClaw's CLI
- * runner pipeline can consume Codex output unchanged.
+ * Transforms `codex exec --json` JSONL events (stdout-piped) into
+ * Claude's stream-json JSONL format. This path gives visible
+ * commentary (intermediate agent_message items) that the MITM
+ * WebSocket path encrypts.
+ *
+ * Codex exec --json event types:
+ *   thread.started       — {thread_id}
+ *   turn.started         — (no payload)
+ *   item.started         — {item: {id, type: "command_execution"|"agent_message", ...}}
+ *   item.completed       — {item: {id, type, text|aggregated_output, exit_code, status}}
+ *   turn.completed       — {usage: {input_tokens, output_tokens, reasoning_output_tokens}}
+ *
+ * agent_message items are the model's visible commentary. Intermediate
+ * ones (before tool calls or other items follow) surface as
+ * thinking_delta. The final agent_message becomes the result text.
  */
 
 let contentBlockIndex = 0;
+let messageStarted = false;
+let threadId = "";
+let lastAgentMessageText = "";
+let pendingAgentMessages: string[] = [];
 
-export function normalizeCodexEvent(evt: Record<string, unknown>): string[] {
-  const type = evt.type as string;
-  const source = evt._source as string | undefined;
+function emitMessageStart(model: string): string {
+  return JSON.stringify({
+    type: "stream_event",
+    event: {
+      type: "message_start",
+      message: { model, role: "assistant", content: [] },
+    },
+  });
+}
+
+export function normalizeCodexExecEvent(evt: Record<string, unknown>): string[] {
   const lines: string[] = [];
+  const rawLine = evt._rawLine as string | undefined;
+  if (!rawLine) return [];
+
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(rawLine) as Record<string, unknown>; } catch { return []; }
+
+  const type = parsed.type as string;
 
   switch (type) {
-    case "response.created": {
-      if (source !== "upstream") break;
-      const resp = evt.response as Record<string, unknown> | undefined;
-      lines.push(JSON.stringify({
-        type: "init",
-        session_id: resp?.id ?? "",
-      }));
-      const model = resp?.model ?? evt.model ?? "";
-      lines.push(JSON.stringify({
-        type: "stream_event",
-        event: {
-          type: "message_start",
-          message: { model, role: "assistant", content: [] },
-        },
-      }));
-      contentBlockIndex = 0;
+    case "thread.started": {
+      threadId = (parsed.thread_id as string) ?? "";
+      lines.push(JSON.stringify({ type: "init", session_id: threadId }));
       break;
     }
 
-    case "response.output_item.added": {
-      if (source !== "upstream") break;
-      const item = evt.item as Record<string, unknown> | undefined;
+    case "turn.started": {
+      if (!messageStarted) {
+        messageStarted = true;
+        lines.push(emitMessageStart("gpt-5.5"));
+      }
+      break;
+    }
+
+    case "item.started": {
+      const item = parsed.item as Record<string, unknown> | undefined;
       if (!item) break;
 
-      if (item.type === "reasoning") {
+      // Flush any pending commentary as thinking before the tool call
+      for (const text of pendingAgentMessages) {
         lines.push(JSON.stringify({
           type: "stream_event",
           event: {
@@ -52,10 +78,7 @@ export function normalizeCodexEvent(evt: Record<string, unknown>): string[] {
           event: {
             type: "content_block_delta",
             index: contentBlockIndex,
-            delta: {
-              type: "thinking_delta",
-              thinking: item.encrypted_content ? "[encrypted reasoning]" : "",
-            },
+            delta: { type: "thinking_delta", thinking: text },
           },
         }));
         lines.push(JSON.stringify({
@@ -63,7 +86,92 @@ export function normalizeCodexEvent(evt: Record<string, unknown>): string[] {
           event: { type: "content_block_stop", index: contentBlockIndex },
         }));
         contentBlockIndex++;
-      } else if (item.type === "message") {
+      }
+      pendingAgentMessages = [];
+
+      if (item.type === "command_execution") {
+        const cmd = (item.command as string) ?? "";
+        lines.push(JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "content_block_start",
+            index: contentBlockIndex,
+            content_block: {
+              type: "tool_use",
+              id: (item.id as string) ?? "",
+              name: "Bash",
+              input: {},
+            },
+          },
+        }));
+        lines.push(JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            index: contentBlockIndex,
+            delta: { type: "input_json_delta", partial_json: JSON.stringify({ command: cmd }) },
+          },
+        }));
+      }
+      break;
+    }
+
+    case "item.completed": {
+      const item = parsed.item as Record<string, unknown> | undefined;
+      if (!item) break;
+
+      if (item.type === "command_execution") {
+        lines.push(JSON.stringify({
+          type: "stream_event",
+          event: { type: "content_block_stop", index: contentBlockIndex },
+        }));
+        contentBlockIndex++;
+      } else if (item.type === "agent_message") {
+        const text = (item.text as string) ?? "";
+        lastAgentMessageText = text;
+        pendingAgentMessages.push(text);
+      }
+      break;
+    }
+
+    case "turn.completed": {
+      const usage = parsed.usage as Record<string, unknown> | undefined;
+
+      // The last agent_message is the actual result — pop it from pending
+      // commentary and emit as text instead of thinking
+      const resultText = lastAgentMessageText;
+      if (pendingAgentMessages.length > 0) {
+        pendingAgentMessages.pop();
+      }
+
+      // Flush remaining commentary as thinking
+      for (const text of pendingAgentMessages) {
+        lines.push(JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "content_block_start",
+            index: contentBlockIndex,
+            content_block: { type: "thinking", thinking: "" },
+          },
+        }));
+        lines.push(JSON.stringify({
+          type: "stream_event",
+          event: {
+            type: "content_block_delta",
+            index: contentBlockIndex,
+            delta: { type: "thinking_delta", thinking: text },
+          },
+        }));
+        lines.push(JSON.stringify({
+          type: "stream_event",
+          event: { type: "content_block_stop", index: contentBlockIndex },
+        }));
+        contentBlockIndex++;
+      }
+      pendingAgentMessages = [];
+
+      // Emit result text as a text block
+      if (resultText) {
         lines.push(JSON.stringify({
           type: "stream_event",
           event: {
@@ -72,85 +180,19 @@ export function normalizeCodexEvent(evt: Record<string, unknown>): string[] {
             content_block: { type: "text", text: "" },
           },
         }));
-      } else if (item.type === "function_call") {
-        lines.push(JSON.stringify({
-          type: "stream_event",
-          event: {
-            type: "content_block_start",
-            index: contentBlockIndex,
-            content_block: {
-              type: "tool_use",
-              id: item.call_id ?? item.id ?? "",
-              name: item.name ?? "",
-              input: {},
-            },
-          },
-        }));
-      }
-      break;
-    }
-
-    case "response.output_text.delta": {
-      if (source !== "upstream") break;
-      const delta = evt.delta as string ?? "";
-      if (delta) {
         lines.push(JSON.stringify({
           type: "stream_event",
           event: {
             type: "content_block_delta",
             index: contentBlockIndex,
-            delta: { type: "text_delta", text: delta },
+            delta: { type: "text_delta", text: resultText },
           },
         }));
-      }
-      break;
-    }
-
-    case "response.function_call_arguments.delta": {
-      if (source !== "upstream") break;
-      const argDelta = evt.delta as string ?? "";
-      if (argDelta) {
         lines.push(JSON.stringify({
           type: "stream_event",
-          event: {
-            type: "content_block_delta",
-            index: contentBlockIndex,
-            delta: { type: "input_json_delta", partial_json: argDelta },
-          },
+          event: { type: "content_block_stop", index: contentBlockIndex },
         }));
-      }
-      break;
-    }
-
-    case "response.output_item.done": {
-      if (source !== "upstream") break;
-      const doneItem = evt.item as Record<string, unknown> | undefined;
-      if (doneItem?.type === "reasoning") break;
-      lines.push(JSON.stringify({
-        type: "stream_event",
-        event: { type: "content_block_stop", index: contentBlockIndex },
-      }));
-      contentBlockIndex++;
-      break;
-    }
-
-    case "response.completed": {
-      if (source !== "upstream") break;
-      const resp = evt.response as Record<string, unknown> | undefined;
-      const usage = resp?.usage as Record<string, unknown> | undefined;
-      const output = resp?.output as Array<Record<string, unknown>> | undefined;
-
-      let resultText = "";
-      if (Array.isArray(output)) {
-        for (const item of output) {
-          if (item.type === "message" && Array.isArray(item.content)) {
-            for (const part of item.content as Array<Record<string, unknown>>) {
-              if (part.type === "output_text" && typeof part.text === "string") {
-                resultText += part.text;
-              }
-            }
-          }
-        }
+        contentBlockIndex++;
       }
 
       lines.push(JSON.stringify({
@@ -165,10 +207,8 @@ export function normalizeCodexEvent(evt: Record<string, unknown>): string[] {
         },
       }));
       lines.push(JSON.stringify({
-        type: "result",
-        result: resultText,
-        session_id: resp?.id ?? "",
-        is_error: false,
+        type: "stream_event",
+        event: { type: "message_stop" },
       }));
       break;
     }
@@ -177,16 +217,29 @@ export function normalizeCodexEvent(evt: Record<string, unknown>): string[] {
   return lines;
 }
 
+export function resetCodexExecNormalizer(): void {
+  contentBlockIndex = 0;
+  messageStarted = false;
+  threadId = "";
+  lastAgentMessageText = "";
+  pendingAgentMessages = [];
+}
+
+// Legacy MITM normalizer — kept for reference but no longer used by the adapter
+export function normalizeCodexEvent(evt: Record<string, unknown>): string[] {
+  return normalizeCodexExecEvent(evt);
+}
+
 export function createCodexNormalizer(): {
   push: (evt: Record<string, unknown>) => string[];
   reset: () => void;
 } {
   return {
     push(evt) {
-      return normalizeCodexEvent(evt);
+      return normalizeCodexExecEvent(evt);
     },
     reset() {
-      contentBlockIndex = 0;
+      resetCodexExecNormalizer();
     },
   };
 }

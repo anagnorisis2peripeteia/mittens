@@ -1,29 +1,24 @@
 /**
  * OpenAI Codex CLI adapter.
  *
- * Codex doesn't have a CLI backend in OpenClaw — Mittens provides the
- * first CLI backend path. Codex is a Rust binary that talks to
- * chatgpt.com via WebSocket. MCP config would be injected via
- * `-c mcp_servers='{...}'` (codex-config-overrides mode).
+ * Uses `codex exec --json` in stdout-pipe mode rather than MITM. The
+ * exec --json JSONL stream includes visible commentary (agent_message
+ * items where the model explains its reasoning), which the MITM
+ * WebSocket path encrypts. This gives richer output — intermediate
+ * reasoning surfaces as thinking_delta instead of [encrypted reasoning].
  *
- * Session management: Codex uses response IDs as session continuations.
- * The response.created event contains the response ID which can be
- * passed back via --previous-response-id for multi-turn.
+ * Session management: Codex uses thread IDs for session continuity.
+ * `codex exec resume --last` resumes the most recent session.
  */
 import type { CliAdapter } from "./types.js";
-import { normalizeCodexEvent } from "./codex-normalizer.js";
+import { normalizeCodexExecEvent } from "./codex-normalizer.js";
 
 export const codexAdapter: CliAdapter = {
   id: "codex",
   name: "Codex",
   binary: "codex",
   binaryEnvVar: "MITTENS_CODEX_BINARY",
-  mode: "mitm",
-  target: {
-    host: "chatgpt.com",
-    port: 443,
-    passthroughHosts: ["api.github.com", "github.com"],
-  },
+  mode: "stdout",
   streamFormat: "ndjson",
   needsTtySpoof: false,
   stripFlags: [],
@@ -31,9 +26,11 @@ export const codexAdapter: CliAdapter = {
   sessionIdFlags: [],
   inputMode: "stdin",
 
+  injectFlags: ["exec", "--json", "--ephemeral", "--dangerously-bypass-approvals-and-sandbox"],
+
   session: {
     mode: "none",
-    sessionIdFields: ["id"],
+    sessionIdFields: ["thread_id"],
   },
 
   model: {
@@ -60,6 +57,6 @@ export const codexAdapter: CliAdapter = {
   baseArgs: [],
 
   normalizeEvent(evt) {
-    return normalizeCodexEvent(evt);
+    return normalizeCodexExecEvent(evt);
   },
 };
