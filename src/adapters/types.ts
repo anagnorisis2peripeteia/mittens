@@ -123,6 +123,19 @@ export interface CliAdapter {
    */
   classifyRequest?: (body: string) => string | undefined;
   /**
+   * Tool names that mark the PRIMARY turn for this CLI (the Task/Agent-style
+   * tool that spawns sub-agents). Passed to the shared layered classifier as
+   * its spawner-name set so a renamed/disguised spawner on THIS CLI is still
+   * recognized as the primary. Undefined → the classifier's defaults.
+   */
+  primarySpawnerToolNames?: readonly string[];
+  /**
+   * System-prompt substrings that positively mark a sub-agent request for this
+   * CLI. Enables the classifier's by-presence sub-agent layer (off until a
+   * live capture confirms a stable marker). Undefined → that layer stays off.
+   */
+  subagentSystemMarkers?: readonly string[];
+  /**
    * Check if a non-SSE response looks like an API error worth surfacing.
    * Returns the error message if so.
    */

@@ -8,6 +8,7 @@
  * Session/config mirrors OpenClaw's claude-cli-interactive backend.
  */
 import type { CliAdapter } from "./types.js";
+import { DEFAULT_SPAWNER_TOOL_NAMES } from "../core/request-classifier.js";
 
 const ANTHROPIC_CLEAR_ENV = [
   "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_OLD", "ANTHROPIC_API_TOKEN",
@@ -23,6 +24,9 @@ export const claudeAdapter: CliAdapter = {
   binaryEnvVar: "MITTENS_CLAUDE_BINARY",
   mode: "mitm",
   hasSessionFiles: true,
+  // Primary-turn spawner tools for Claude Code (the Task/Agent tool). Forwarded
+  // to the shared classifier so sub-agent streams are detected robustly.
+  primarySpawnerToolNames: DEFAULT_SPAWNER_TOOL_NAMES,
   target: {
     host: "api.anthropic.com",
     port: 443,

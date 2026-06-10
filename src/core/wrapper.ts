@@ -407,6 +407,8 @@ async function main(): Promise<void> {
         passthroughSuffixes: adapter.target.passthroughHosts,
         useH2: adapter.target.useH2,
         mitmAll: adapter.target.mitmAll,
+        spawnerToolNames: adapter.primarySpawnerToolNames,
+        subagentSystemMarkers: adapter.subagentSystemMarkers,
       } : undefined);
     } catch (e) {
       process.stderr.write(

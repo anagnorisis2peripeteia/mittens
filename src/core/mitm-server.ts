@@ -27,6 +27,7 @@ import tls from "node:tls";
 import { readFileSync } from "node:fs";
 import type { CertPaths } from "./cert-manager.js";
 import { ensureLeafCert } from "./cert-manager.js";
+import { classifyRequest, type ClassifyState, type RequestType } from "./request-classifier.js";
 
 import { execFileSync, spawn as spawnChild } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -149,6 +150,12 @@ export type MitmTargetConfig = {
   useH2?: boolean;
   /** MITM ALL allowed hosts (not just the primary target). Requires SNI-based dynamic certs. */
   mitmAll?: boolean;
+  /** Per-adapter PRIMARY spawner tool names, forwarded to the request classifier
+   *  so a renamed/disguised spawner is still recognized as the primary turn. */
+  spawnerToolNames?: readonly string[];
+  /** Per-adapter sub-agent system-prompt markers (enables the by-presence
+   *  sub-agent layer in the classifier). */
+  subagentSystemMarkers?: readonly string[];
 };
 
 export function isAllowedConnectHost(host: string, target?: MitmTargetConfig): boolean {
@@ -178,6 +185,10 @@ export async function startMitmProxy(certs: CertPaths, target?: MitmTargetConfig
   // accumulator. Reset is unnecessary — the counter only needs to be
   // unique within a single wrapper invocation's lifetime.
   let nextReqId = 1;
+  // Per-run classifier state (primary-spawner-seen), threaded into the layered
+  // classifyRequest so an Agent-less request stays primary until a spawner is
+  // seen — gating the by-absence sub-agent layer against mis-suppression/hangs.
+  const classifyState: ClassifyState = { primarySpawnerSeen: false };
   // Track last stop_reason across requests. After "max_tokens", the next
   // request is either a higher-limit retry (same last user msg) or compaction
   // (new compaction prompt as last user msg — caught by content markers).
@@ -385,55 +396,16 @@ export async function startMitmProxy(certs: CertPaths, target?: MitmTargetConfig
     }
 
     const reqBody = reqBodyChunks.length > 0 ? Buffer.concat(reqBodyChunks).toString("utf8") : undefined;
-    let requestType: "normal" | "compaction" | "tool_followup" | "auxiliary" | "subagent" = "normal";
-
+    // Classify the outbound request so the wrapper can route the SSE stream
+    // (see classifyRequest for the layered primary-vs-subagent logic). The only
+    // downstream effect is which streams are tagged "subagent" (turn-end
+    // suppressed) vs the user-facing "normal"/"tool_followup" turn.
+    let requestType: RequestType = "normal";
     if (reqMethod === "POST" && reqBody) {
-      try {
-        const parsed = JSON.parse(reqBody);
-        const hasTools = Array.isArray(parsed.tools) && parsed.tools.length > 0;
-        const msgs: unknown[] = Array.isArray(parsed.messages) ? parsed.messages : [];
-        const lastMsg = msgs[msgs.length - 1] as Record<string, unknown> | undefined;
-        if (lastMsg) {
-          if (lastMsg.role === "tool") {
-            requestType = "tool_followup";
-          } else if (Array.isArray(lastMsg.content)) {
-            const hasToolResult = (lastMsg.content as Record<string, unknown>[]).some(
-              (b) => b.type === "tool_result",
-            );
-            if (hasToolResult) requestType = "tool_followup";
-          }
-          if (requestType === "normal" && lastMsg.role === "user") {
-            const lastContent =
-              typeof lastMsg.content === "string"
-                ? lastMsg.content
-                : Array.isArray(lastMsg.content)
-                  ? (lastMsg.content as Record<string, unknown>[])
-                      .map((b) => (typeof b.text === "string" ? b.text : ""))
-                      .join("")
-                  : "";
-            if (
-              lastContent.includes("summary should include the following sections") &&
-              (lastContent.includes("continuation summary") || lastContent.includes("detailed summary"))
-            ) {
-              requestType = "compaction";
-            }
-          }
-        }
-        if (requestType === "normal" && !hasTools) requestType = "auxiliary";
-        if (requestType === "normal" || requestType === "tool_followup") {
-          const toolList = Array.isArray(parsed.tools) ? parsed.tools : [];
-          const hasAgentTool = toolList.some(
-            (t: Record<string, unknown> | null) => t?.name === "Agent",
-          );
-          const usesServerWebSearch = toolList.some((t: Record<string, unknown> | null) => {
-            const ty = t?.type;
-            return typeof ty === "string" && ty.includes("web_search");
-          });
-          if (!hasAgentTool || usesServerWebSearch) {
-            requestType = "subagent";
-          }
-        }
-      } catch {}
+      requestType = classifyRequest(reqBody, classifyState, {
+        spawnerToolNames: target?.spawnerToolNames,
+        subagentSystemMarkers: target?.subagentSystemMarkers,
+      });
     }
 
     const reqId = nextReqId++;
